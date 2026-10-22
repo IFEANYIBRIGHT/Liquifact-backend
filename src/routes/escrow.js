@@ -3,7 +3,7 @@
 const express = require('express');
 const config = require('../config');
 const { decodeEscrow } = require('../stellar/escrow-decoder');
-const { badRequest, conflict, internal } = require('../errors');
+const { conflict } = require('../errors');
 
 const router = express.Router();
 

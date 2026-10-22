@@ -301,7 +301,6 @@ router.post('/verify', async (req, res) => {
     try {
       sha256 = await hashUploadedFile(req);
     } catch (err) {
-      const _status = err.status || 400;
       const code = err.code || 'UPLOAD_ERROR';
       if (code === 'FILE_TOO_LARGE') {
         throw conflict('FILE_TOO_LARGE');
@@ -328,7 +327,7 @@ router.post('/verify', async (req, res) => {
   let log;
   try {
     [primaryHash, log] = await Promise.all([fetchPrimaryHash(), fetchFullLog()]);
-  } catch (err) {
+  } catch (_err) {
     throw new ApiError(502, 'ESCROW_READ_FAILED', 'Escrow Read Failed', { detail: 'Soroban RPC read failed' });
   }
 
