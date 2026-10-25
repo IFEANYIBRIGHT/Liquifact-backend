@@ -73,7 +73,7 @@ describe('system', () => {
 
   test('malformed JSON returns 400 MALFORMED_JSON without parser internals', async () => {
     const res = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .set('Content-Type', 'application/json')
       .send('{"a":');
     expect(res.status).toBe(400);
@@ -88,7 +88,7 @@ describe('system', () => {
   test('payload too large returns 413 PAYLOAD_TOO_LARGE', async () => {
     const largeBody = 'x'.repeat(110 * 1024);
     const res = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .set('Content-Type', 'application/json')
       .send(largeBody);
     expect(res.status).toBe(413);
@@ -206,7 +206,8 @@ describe('invoices', () => {
     const bad = await request(app).get('/api/invoices?status=weird');
     expect(bad.status).toBe(400);
     expect(bad.type).toMatch(/application\/problem\+json/);
-    expect(bad.body.code).toBe('INVALID_STATUS_FILTER');
+    expect(bad.body.code).toBe('VALIDATION_FAILED');
+    expect(bad.body.details.status).toEqual(expect.any(String));
   });
 
   test('remainingCapacity is present in list and detail', async () => {
@@ -253,14 +254,14 @@ describe('invoices', () => {
   });
 
   test('fund without investor returns INVESTOR_REQUIRED', async () => {
-    const res = await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 100 });
+    const res = await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 100 });
     expect(res.status).toBe(400);
     expect(res.type).toMatch(/application\/problem\+json/);
     expect(res.body.code).toBe('INVESTOR_REQUIRED');
   });
 
   test('fund with invalid investor address returns INVALID_INVESTOR_ADDRESS', async () => {
-    const res = await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 100, investor: 'invalid' });
+    const res = await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 100, investor: 'invalid' });
     expect(res.status).toBe(400);
     expect(res.type).toMatch(/application\/problem\+json/);
     expect(res.body.code).toBe('INVALID_INVESTOR_ADDRESS');
@@ -268,7 +269,7 @@ describe('invoices', () => {
 
   test('fund self-funding returns SELF_FUNDING_NOT_ALLOWED', async () => {
     const smeAddress = 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5';
-    const res = await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 100, investor: smeAddress });
+    const res = await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 100, investor: smeAddress });
     expect(res.status).toBe(422);
     expect(res.type).toMatch(/application\/problem\+json/);
     expect(res.body.code).toBe('SELF_FUNDING_NOT_ALLOWED');

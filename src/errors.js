@@ -111,6 +111,16 @@ const ERROR_CATALOG = {
     status: 502,
     description: 'The Soroban RPC read operation failed.',
   },
+  FUNDING_EXCEEDS_CAPACITY: {
+    title: 'Funding Exceeds Capacity',
+    status: 422,
+    description: 'The contribution exceeds the remaining funding capacity of the invoice (set allowPartial to cap it).',
+  },
+  INVALID_STATE_TRANSITION: {
+    title: 'Invalid State Transition',
+    status: 409,
+    description: 'The invoice is not in a status that allows this transition.',
+  },
   ROUTE_NOT_FOUND: {
     title: 'Route Not Found',
     status: 404,
@@ -195,6 +205,25 @@ function internal(detail) {
   return new ApiError(500, 'INTERNAL', ERROR_CATALOG.INTERNAL.title, { detail });
 }
 
+/**
+ * Sends an RFC 7807 problem response for a catalog code without throwing
+ * (for handlers that must also record the rejection, e.g. in the audit log).
+ *
+ * @param {import('express').Request} req request
+ * @param {import('express').Response} res response
+ * @param {string} code catalog code
+ * @param {{ status?: number, detail?: string, errors?: object[], extra?: object }} [options] overrides
+ * @returns {import('express').Response} the response
+ */
+function sendProblem(req, res, code, { status, detail, errors, extra } = {}) {
+  const entry = ERROR_CATALOG[code];
+  if (!entry) {
+    throw new Error(`Unknown error code: ${code}`);
+  }
+  const error = new ApiError(status || entry.status, code, entry.title, { detail, errors, extra });
+  return res.status(error.status).type('application/problem+json').json(error.toProblem(req));
+}
+
 function getCatalogEntry(code) {
   return ERROR_CATALOG[code] || null;
 }
@@ -212,6 +241,7 @@ module.exports = {
   conflict,
   unprocessable,
   internal,
+  sendProblem,
   getCatalogEntry,
   getAllCatalogEntries,
 };

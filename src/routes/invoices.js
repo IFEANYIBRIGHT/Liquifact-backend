@@ -7,7 +7,7 @@ const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
-const { ApiError, badRequest, notFound, conflict, unprocessable } = require('../errors');
+const { ApiError, badRequest, notFound, conflict, unprocessable, sendProblem } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 const { requireAdminToken } = require('../middleware/require-admin-token');
 const escrowReader = require('./escrow');
@@ -240,7 +240,14 @@ router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate
     req.audit({ action: 'invoice.fund', resourceType: 'invoice', resourceId: req.params.id, ...details });
   const reject = (statusCode, error, details, extra = {}) => {
     record({ outcome: 'rejected', statusCode, metadata: { error, ...details.metadata }, before: details.before });
-    return res.status(statusCode).json({ error, ...extra });
+    const { code: extraCode, ...rest } = extra;
+    const isCode = /^[A-Z_]+$/.test(error);
+    const code = extraCode || (isCode ? error : { 404: 'INVOICE_NOT_FOUND', 409: 'INVOICE_NOT_OPEN' }[statusCode]);
+    return sendProblem(req, res, code, {
+      status: statusCode,
+      detail: isCode ? undefined : error,
+      extra: Object.keys(rest).length ? rest : undefined,
+    });
   };
 
   const invoice = store.get(req.params.id);
@@ -373,7 +380,7 @@ function transitionAudit(req, res, action) {
   return {
     reject(statusCode, error, before = null) {
       record({ outcome: 'rejected', statusCode, before, metadata: { error } });
-      return res.status(statusCode).json({ error });
+      return sendProblem(req, res, statusCode === 404 ? 'INVOICE_NOT_FOUND' : 'INVALID_STATE_TRANSITION', { detail: error });
     },
     success(before, updated) {
       record({ outcome: 'success', statusCode: 200, before, after: { fundedAmount: updated.fundedAmount, status: updated.status } });

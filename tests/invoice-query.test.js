@@ -148,7 +148,7 @@ test('documents all query parameters, page fields and error codes in OpenAPI', a
   expect(spec.parameters.find((param) => param.name === 'sort').schema.enum).toEqual(SORTS);
   expect(spec.parameters.find((param) => param.name === 'limit').schema).toMatchObject({ minimum: 1, maximum: 100, default: 20 });
   expect(spec.responses[200].content['application/json'].schema.required).toEqual(['data', 'count', 'total', 'nextCursor']);
-  expect(spec.responses[400].content['application/json'].schema.properties.code.enum).toEqual(['VALIDATION_FAILED', 'INVALID_CURSOR']);
+  expect(spec.responses[400].content['application/problem+json'].schema.properties.code.enum).toEqual(['VALIDATION_FAILED', 'INVALID_CURSOR']);
 });
 
 test('uses default and maximum page bounds and handles an empty store', async () => {

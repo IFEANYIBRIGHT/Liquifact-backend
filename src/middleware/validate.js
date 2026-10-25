@@ -1,5 +1,7 @@
 'use strict';
 
+const { sendProblem } = require('../errors');
+
 /**
  * Validation middleware factory.
  *
@@ -7,9 +9,9 @@
  *   router.post('/', validate({ body: CreateInvoiceBody }), handler)
  *   router.get('/:id', validate({ params: InvoiceIdParam }), handler)
  *
- * On failure returns:
- *   400  { error, code: 'VALIDATION_FAILED', details: string[], errors: [{path, message, code}] }
- *   415  { error, code: 'UNSUPPORTED_MEDIA_TYPE' }  (when a body schema is given but Content-Type isn't application/json)
+ * On failure returns RFC 7807 application/problem+json:
+ *   400  { type, title, status, code: 'VALIDATION_FAILED', instance, errors: [{field, path, message, code}], details: string[], error }
+ *   415  { ..., code: 'UNSUPPORTED_MEDIA_TYPE' }  (when a body schema is given but Content-Type isn't application/json)
  *
  * When `audit` names an action and the request carries `req.audit` (see
  * audit/middleware.js), every rejected request is recorded in the audit log.
@@ -30,7 +32,13 @@ function validate({ body: bodySchema, params: paramsSchema, query: querySchema, 
           metadata: payload.details ? { errors: payload.details } : { error: payload.error, code: payload.code },
         });
       }
-      return res.status(statusCode).json(payload);
+      return sendProblem(req, res, payload.code, {
+        status: statusCode,
+        detail: payload.error,
+        errors: payload.errors ? payload.errors.map((e) => ({ field: e.path, ...e })) : undefined,
+        // Legacy flat string list kept for existing clients.
+        extra: payload.details ? { details: payload.details } : undefined,
+      });
     };
 
     // 415 check — only when we expect a JSON body

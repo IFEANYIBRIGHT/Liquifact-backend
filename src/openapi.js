@@ -773,7 +773,18 @@ function createSpec(baseUrl) {
           ],
           responses: {
             200: { description: 'Filtered invoice page', ...json({ type: 'object', required: ['data', 'count', 'total', 'nextCursor'], properties: { data: { type: 'array', maxItems: 100, items: Invoice }, count: { type: 'integer', minimum: 0, description: 'Page length (legacy meaning preserved)' }, total: { type: 'integer', minimum: 0, description: 'Filtered count before applying cursor and limit' }, nextCursor: { type: 'string', nullable: true, description: 'Null when no further records remain' } } }) },
-            400: { description: 'Invalid/unknown/repeated query parameter or malformed/sort-mismatched cursor (VALIDATION_FAILED or INVALID_CURSOR)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            400: {
+              description: 'Invalid/unknown/repeated query parameter or malformed/sort-mismatched cursor (VALIDATION_FAILED or INVALID_CURSOR)',
+              ...problemJson({
+                type: 'object',
+                required: ['type', 'title', 'status', 'code', 'instance'],
+                properties: {
+                  ...Problem.properties,
+                  code: { type: 'string', enum: ['VALIDATION_FAILED', 'INVALID_CURSOR'] },
+                  details: { type: 'object', additionalProperties: { type: 'string' }, description: 'Parameter name -> message' },
+                },
+              }),
+            },
           },
         },
         post: {
@@ -786,7 +797,7 @@ function createSpec(baseUrl) {
             201: { description: 'Created', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: Invoice } }) },
             400: {
               description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or missing/invalid Idempotency-Key',
-              ...json(ref('ErrorResponse')),
+              ...problemJson({ $ref: '#/components/schemas/Problem' }),
             },
             403: { description: 'SME_NOT_VERIFIED (REQUIRE_SME_VERIFICATION=true and the SME is not verified)', ...json(ref('ErrorResponse')) },
             404: { description: 'SME_NOT_FOUND (unknown smeId)', ...json(ref('ErrorResponse')) },
@@ -795,7 +806,7 @@ function createSpec(baseUrl) {
               headers: { 'Retry-After': { schema: { type: 'string' } } },
               ...json(DuplicateError),
             },
-            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...json(ref('ErrorResponse')) },
+            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
             ...IdempotencyErrors,
           },
         },
@@ -867,7 +878,7 @@ function createSpec(baseUrl) {
               headers: { 'Retry-After': { schema: { type: 'string' } } },
               ...json(ErrorBody),
             },
-            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...json(ref('ErrorResponse')) },
+            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
             422: {
               description: 'Contribution exceeds remaining capacity, self-funding not allowed, or IDEMPOTENCY_KEY_REUSED',
               ...json(FundingError),
@@ -1418,9 +1429,9 @@ function createSpec(baseUrl) {
           requestBody: { required: true, ...json(ref('CreateSmeRequest')) },
           responses: {
             201: { description: 'SME created (pending review)', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
-            400: { description: 'Invalid SME fields (VALIDATION_FAILED)', ...json(ref('ErrorResponse')) },
+            400: { description: 'Invalid SME fields (VALIDATION_FAILED)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
             409: { description: 'SME_DUPLICATE: same country + registration number, or same Stellar address', ...json(ref('ErrorResponse')) },
-            415: { description: 'Content-Type must be application/json', ...json(ref('ErrorResponse')) },
+            415: { description: 'Content-Type must be application/json', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
           },
         },
       },
@@ -1447,7 +1458,7 @@ function createSpec(baseUrl) {
           requestBody: { required: true, ...json(ref('ReviewSmeRequest')) },
           responses: {
             200: { description: 'Review recorded', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
-            400: { description: 'Invalid review request (VALIDATION_FAILED)', ...json(ref('ErrorResponse')) },
+            400: { description: 'Invalid review request (VALIDATION_FAILED)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
             404: { description: 'SME_NOT_FOUND', ...json(ref('ErrorResponse')) },
             409: { description: 'INVALID_TRANSITION', ...json(ref('ErrorResponse')) },
             ...adminErrors,
