@@ -1,5 +1,6 @@
 'use strict';
 
+const { authHeader, KEYS } = require('./helpers/auth');
 const request = require('supertest');
 const express = require('express');
 const app = require('../src/app');
@@ -32,7 +33,7 @@ beforeEach(() => {
 
 describe('recording mutations', () => {
   test('invoice.create records who/what/when with the created invoice as "after"', async () => {
-    const res = await request(app).post('/api/invoices').send(NEW_INVOICE);
+    const res = await request(app).post('/api/invoices').set(authHeader()).send(NEW_INVOICE);
     expect(res.status).toBe(201);
     expect(entries()).toHaveLength(1);
     const [e] = entries();
@@ -43,7 +44,8 @@ describe('recording mutations', () => {
     expect(e.resourceId).toBe(res.body.data.id);
     expect(e.outcome).toBe('success');
     expect(e.statusCode).toBe(201);
-    expect(e.actor).toBe('anonymous');
+    // The authenticated API key id is recorded as the actor (#1534).
+    expect(e.actor).toBe('test-admin');
     expect(e.before).toBeNull();
     expect(e.after.amount).toBe(500);
     expect(e.after.status).toBe('open');
@@ -52,7 +54,7 @@ describe('recording mutations', () => {
   });
 
   test('invoice.fund records before/after fundedAmount and status', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1000, investor: INVESTOR });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1000, investor: INVESTOR });
     expect(res.status).toBe(200);
     expect(res.body.data.fundedAmount).toBe(19000);
     const [e] = entries();
@@ -66,7 +68,7 @@ describe('recording mutations', () => {
   });
 
   test('a fund that completes the invoice records the status change and the requested amount', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor: INVESTOR });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor: INVESTOR });
     expect(res.body.data.status).toBe('funded');
     const [e] = entries();
     expect(e.before).toEqual({ fundedAmount: 18000, status: 'open' });
@@ -75,7 +77,7 @@ describe('recording mutations', () => {
   });
 
   test('a fund without a valid investor is recorded as rejected', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10 });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 10 });
     expect(res.status).toBe(400);
     const [e] = entries();
     expect(e.action).toBe('invoice.fund');
@@ -85,10 +87,10 @@ describe('recording mutations', () => {
   });
 
   test('settle and cancel transitions are recorded with before/after status', async () => {
-    expect((await request(app).post('/api/invoices/INV_0003/settle')).status).toBe(200);
-    expect((await request(app).post('/api/invoices/INV_0001/settle')).status).toBe(409);
-    expect((await request(app).post('/api/invoices/INV_0001/cancel')).status).toBe(200);
-    expect((await request(app).post('/api/invoices/missing/cancel')).status).toBe(404);
+    expect((await request(app).post('/api/invoices/INV_0003/settle').set(authHeader())).status).toBe(200);
+    expect((await request(app).post('/api/invoices/INV_0001/settle').set(authHeader())).status).toBe(409);
+    expect((await request(app).post('/api/invoices/INV_0001/cancel').set(authHeader())).status).toBe(200);
+    expect((await request(app).post('/api/invoices/missing/cancel').set(authHeader())).status).toBe(404);
 
     const [settled, notFunded, cancelled, missing] = entries();
     expect(settled).toEqual(expect.objectContaining({ action: 'invoice.settle', resourceId: 'INV_0003', outcome: 'success', statusCode: 200 }));
@@ -103,9 +105,9 @@ describe('recording mutations', () => {
   });
 
   test('rejected fund attempts (404, 400, 409) are recorded as rejected and change nothing', async () => {
-    expect((await request(app).post('/api/invoices/missing/fund').send({ amount: 5, investor: INVESTOR })).status).toBe(404);
-    expect((await request(app).post('/api/invoices/INV_0001/fund').send({ amount: -5, investor: INVESTOR })).status).toBe(400);
-    expect((await request(app).post('/api/invoices/INV_0003/fund').send({ amount: 1, investor: INVESTOR })).status).toBe(409);
+    expect((await request(app).post('/api/invoices/missing/fund').set(authHeader()).send({ amount: 5, investor: INVESTOR })).status).toBe(404);
+    expect((await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: -5, investor: INVESTOR })).status).toBe(400);
+    expect((await request(app).post('/api/invoices/INV_0003/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR })).status).toBe(409);
 
     const [notFound, invalid, notOpen] = entries();
     expect(entries().map((e) => e.outcome)).toEqual(['rejected', 'rejected', 'rejected']);
@@ -128,7 +130,7 @@ describe('recording mutations', () => {
   });
 
   test('a rejected create is recorded with the validation errors', async () => {
-    const res = await request(app).post('/api/invoices').send({ sme: '' });
+    const res = await request(app).post('/api/invoices').set(authHeader()).send({ sme: '' });
     expect(res.status).toBe(400);
     const [e] = entries();
     expect(e.action).toBe('invoice.create');
@@ -139,11 +141,11 @@ describe('recording mutations', () => {
   });
 
   test('response shapes are unchanged', async () => {
-    const created = await request(app).post('/api/invoices').send(NEW_INVOICE);
+    const created = await request(app).post('/api/invoices').set(authHeader()).send(NEW_INVOICE);
     expect(Object.keys(created.body)).toEqual(['data']);
-    const bad = await request(app).post('/api/invoices').send({});
+    const bad = await request(app).post('/api/invoices').set(authHeader()).send({});
     expect(Object.keys(bad.body).sort()).toEqual(['code', 'details', 'error', 'errors']);
-    const funded = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR });
+    const funded = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR });
     expect(Object.keys(funded.body)).toEqual(['data']);
   });
 
@@ -155,22 +157,22 @@ describe('recording mutations', () => {
   });
 
   test('a safe client request id is kept; an unsafe one is replaced', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'req-123').send({ amount: 1, investor: INVESTOR });
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Request-Id', 'bad id!<script>').send({ amount: 1, investor: INVESTOR });
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'req-123').send({ amount: 1, investor: INVESTOR });
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Request-Id', 'bad id!<script>').send({ amount: 1, investor: INVESTOR });
     expect(entries()[0].requestId).toBe('req-123');
     expect(entries()[1].requestId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   test('the client IP is stored truncated', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').set('X-Forwarded-For', '203.0.113.77').send({ amount: 1, investor: INVESTOR });
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set('X-Forwarded-For', '203.0.113.77').send({ amount: 1, investor: INVESTOR });
     expect(entries()[0].ip).toBe('203.0.113.0/24');
     expect(JSON.stringify(entries())).not.toContain('203.0.113.77');
   });
 
   test('the chain verifies after a mix of mutations', async () => {
-    await request(app).post('/api/invoices').send(NEW_INVOICE);
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10, investor: INVESTOR });
-    await request(app).post('/api/invoices/missing/fund').send({ amount: 10, investor: INVESTOR });
+    await request(app).post('/api/invoices').set(authHeader()).send(NEW_INVOICE);
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 10, investor: INVESTOR });
+    await request(app).post('/api/invoices/missing/fund').set(authHeader()).send({ amount: 10, investor: INVESTOR });
     const res = await admin(request(app).get('/api/audit/verify'));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ valid: true, entries: 3 });
@@ -178,17 +180,18 @@ describe('recording mutations', () => {
 });
 
 describe('redaction', () => {
-  const SECRETS = ['super-secret-bearer', 'key-12345', 'hunter2', 'SABCDEF', 'p4ss-w0rd', 'tok-789'];
+  const SECRETS = [KEYS.admin, 'key-12345', 'hunter2', 'SABCDEF', 'p4ss-w0rd', 'tok-789'];
 
   test('Authorization, API keys and secret/seed/password/token fields never reach any stored entry', async () => {
-    const headers = { Authorization: 'Bearer super-secret-bearer', 'X-API-Key': 'key-12345' };
+    // The (valid) API key travels in Authorization; neither it nor X-API-Key may be stored.
+    const headers = { 'X-API-Key': 'key-12345' };
     const extras = { secret: 'hunter2', seed: 'SABCDEF', password: 'p4ss-w0rd', token: 'tok-789' };
 
-    await request(app).post('/api/invoices').set(headers).send({ ...NEW_INVOICE, ...extras });
-    await request(app).post('/api/invoices').set(headers).send({ sme: '', ...extras });
-    await request(app).post('/api/invoices/INV_0002/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
-    await request(app).post('/api/invoices/INV_0003/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
-    await request(app).post('/api/invoices/missing/fund').set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
+    await request(app).post('/api/invoices').set(authHeader()).set(headers).send({ ...NEW_INVOICE, ...extras });
+    await request(app).post('/api/invoices').set(authHeader()).set(headers).send({ sme: '', ...extras });
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
+    await request(app).post('/api/invoices/INV_0003/fund').set(authHeader()).set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
+    await request(app).post('/api/invoices/missing/fund').set(authHeader()).set(headers).send({ amount: 1, investor: INVESTOR, ...extras });
     expect(entries()).toHaveLength(5);
 
     const stored = JSON.stringify(entries());
@@ -201,10 +204,10 @@ describe('redaction', () => {
 
 describe('GET /api/audit', () => {
   beforeEach(async () => {
-    await request(app).post('/api/invoices').send(NEW_INVOICE); // seq 1 -> INV_0005
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR }); // seq 2
-    await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 1, investor: INVESTOR }); // seq 3
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR }); // seq 4
+    await request(app).post('/api/invoices').set(authHeader()).send(NEW_INVOICE); // seq 1 -> INV_0005
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR }); // seq 2
+    await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR }); // seq 3
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR }); // seq 4
   });
 
   test('lists entries oldest first', async () => {
@@ -322,7 +325,7 @@ describe('history cannot be rewritten through the API', () => {
   });
 
   test('there is no route to edit or delete entries', async () => {
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor: INVESTOR });
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor: INVESTOR });
     const before = JSON.stringify(entries());
     for (const method of ['post', 'put', 'patch', 'delete']) {
       for (const path of ['/api/audit', '/api/audit/1']) {

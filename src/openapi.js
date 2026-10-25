@@ -277,6 +277,86 @@ const EscrowLiveResponse = {
   },
 };
 
+/** Response of GET /health and GET /healthz. */
+const HealthResponse = {
+  type: 'object',
+  required: ['status', 'service', 'version', 'timestamp', 'uptimeSeconds'],
+  properties: {
+    status: { type: 'string', enum: ['ok'], description: 'Always "ok": the liveness probe never checks dependencies' },
+    service: { type: 'string', example: 'liquifact-api' },
+    version: { type: 'string', example: '1.0.0' },
+    timestamp: { type: 'string', format: 'date-time' },
+    uptimeSeconds: { type: 'integer', minimum: 0, description: 'Seconds since the process started' },
+  },
+};
+
+/** Short, non-sensitive failure codes reported by the readiness checks. */
+const ReadinessErrorCode = {
+  type: 'string',
+  enum: ['TIMEOUT', 'PASSPHRASE_MISMATCH', 'STALE_LEDGER', 'CONTRACT_NOT_FOUND', 'RPC_ERROR'],
+  description: 'Present only on the failing check; raw upstream messages are never returned',
+};
+
+/** Response of GET /ready. */
+const ReadinessResponse = {
+  type: 'object',
+  required: ['status', 'checks'],
+  properties: {
+    status: { type: 'string', enum: ['ready', 'not_ready'] },
+    checks: {
+      type: 'object',
+      required: ['rpc', 'network', 'ledger', 'contract'],
+      properties: {
+        rpc: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The Soroban RPC answers and reports itself as healthy',
+          properties: {
+            ok: { type: 'boolean' },
+            latencyMs: { type: 'integer', minimum: 0, description: 'Round-trip time of the health call' },
+            error: ReadinessErrorCode,
+          },
+        },
+        network: {
+          type: 'object',
+          required: ['ok', 'expected', 'actual'],
+          description: 'The RPC serves the network the API is configured for',
+          properties: {
+            ok: { type: 'boolean' },
+            expected: { type: 'string', description: 'Configured network passphrase' },
+            actual: { type: 'string', nullable: true, description: 'Network passphrase reported by the RPC' },
+            error: ReadinessErrorCode,
+          },
+        },
+        ledger: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The latest ledger is recent enough to be served by a healthy node',
+          properties: {
+            ok: { type: 'boolean' },
+            sequence: { type: 'integer', nullable: true, description: 'Sequence of the latest ledger' },
+            ageSeconds: {
+              type: 'integer',
+              nullable: true,
+              minimum: 0,
+              description: 'Age of the latest ledger; null when the RPC does not expose a ledger close time',
+            },
+            error: ReadinessErrorCode,
+          },
+        },
+        contract: {
+          type: 'object',
+          required: ['ok'],
+          description: 'The configured escrow contract is deployed on the RPC network',
+          properties: {
+            ok: { type: 'boolean' },
+            error: ReadinessErrorCode,
+          },
+        },
+      },
+    },
+  },
+};
 const Mismatch = {
   type: 'object',
   properties: {
@@ -426,6 +506,76 @@ const DeliveryRecord = {
   },
 };
 
+const IdempotencyKeyParam = {
+  name: 'Idempotency-Key',
+  in: 'header',
+  required: false,
+  description:
+    'Idempotency key for safe retries (8-128 chars: letters, digits, _ and -). A repeat with the same key and ' +
+    'payload replays the first response; required when IDEMPOTENCY_REQUIRED=true.',
+  schema: { type: 'string', minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' },
+};
+
+const IdempotencyHeaders = {
+  'Idempotency-Key': { description: 'Echo of the request Idempotency-Key', schema: { type: 'string' } },
+  'Idempotent-Replayed': {
+    description: 'Present with value "true" when the response is a replay of a cached request',
+    schema: { type: 'string' },
+  },
+};
+
+const IdempotencyErrors = {
+  422: { description: 'IDEMPOTENCY_KEY_REUSED: the key was used with a different payload', ...json(ErrorBody) },
+};
+
+const authErrorBody = (codes) => ({
+  type: 'object',
+  required: ['error', 'code'],
+  properties: { error: { type: 'string' }, code: { type: 'string', enum: codes } },
+});
+
+/** Mutating operations guarded by `requireRole` (src/middleware/auth.js) and the roles they accept. */
+const API_KEY_OPERATIONS = [
+  ['/api/invoices', 'post', ['sme', 'admin']],
+  ['/api/invoices/{id}/fund', 'post', ['investor', 'admin']],
+  ['/api/invoices/{id}/settle', 'post', ['admin']],
+  ['/api/invoices/{id}/cancel', 'post', ['sme', 'admin']],
+  ['/api/invoices/{id}/document', 'post', ['sme', 'admin']],
+  ['/api/escrow/attestations/verify', 'post', ['sme', 'investor', 'admin']],
+  ['/api/smes', 'post', ['sme', 'admin']],
+];
+
+/**
+ * Applies the ApiKeyAuth scheme and its 401/403/503 responses to every
+ * API-key-guarded operation.
+ *
+ * @param {object} spec OpenAPI document
+ * @returns {object} the same document
+ */
+function applyApiKeySecurity(spec) {
+  for (const [path, method, roles] of API_KEY_OPERATIONS) {
+    const operation = spec.paths[path] && spec.paths[path][method];
+    if (!operation) {
+      continue;
+    }
+    operation.security = [{ ApiKeyAuth: [] }];
+    operation.description = `${operation.description ? `${operation.description} ` : ''}Requires an API key with role: ${roles.join(' or ')}.`;
+    // Keep any route-specific 403 (e.g. SME_NOT_VERIFIED) alongside FORBIDDEN.
+    const existing403 = operation.responses[403];
+    const extraCode = existing403 && /^[A-Z_]+/.exec(existing403.description);
+    operation.responses = {
+      ...operation.responses,
+      401: { description: 'Missing, malformed or unknown API key', ...json(authErrorBody(['UNAUTHENTICATED'])) },
+      403: {
+        description: `API key role not allowed (needs ${roles.join(' or ')})${existing403 ? `; or ${existing403.description}` : ''}`,
+        ...json(authErrorBody(extraCode ? ['FORBIDDEN', extraCode[0]] : ['FORBIDDEN'])),
+      },
+      503: { description: 'API_KEYS not configured in production (fail closed)', ...json(authErrorBody(['AUTH_NOT_CONFIGURED'])) },
+    };
+  }
+  return spec;
+}
+
 // Built documents are memoised per base URL (bounded, since the base URL can come from the Host header).
 const SPEC_CACHE_LIMIT = 16;
 const specCache = new Map();
@@ -455,7 +605,7 @@ function buildSpec(baseUrl) {
  * @returns {object} OpenAPI 3.0 document
  */
 function createSpec(baseUrl) {
-  return {
+  return applyApiKeySecurity({
     openapi: '3.0.3',
     info: {
       title: 'LiquiFact API',
@@ -473,9 +623,17 @@ function createSpec(baseUrl) {
       { name: 'Reconciliation' },
       { name: 'Audit' },
       { name: 'Webhooks' },
+      { name: 'SMEs' },
     ],
     components: {
       securitySchemes: {
+        ApiKeyAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          description:
+            'API key (`Authorization: Bearer <key>` or `X-API-Key: <key>`) configured in API_KEYS with a role: ' +
+            'sme, investor or admin. Required on mutating invoice/SME/attestation routes; GET routes are public.',
+        },
         adminBearer: {
           type: 'http',
           scheme: 'bearer',
@@ -496,6 +654,8 @@ function createSpec(baseUrl) {
         InvestorPosition,
         EscrowState,
         EscrowLiveResponse,
+        HealthResponse,
+        ReadinessResponse,
         AuditEntry,
         AuditList,
         AuditVerification,
@@ -506,7 +666,26 @@ function createSpec(baseUrl) {
         get: {
           tags: ['System'],
           summary: 'Liveness probe',
-          responses: { 200: { description: 'Service is up', ...json({ type: 'object' }) } },
+          description: 'Dependency-free liveness probe. It never calls the Soroban RPC.',
+          responses: { 200: { description: 'Service is up', ...json({ $ref: '#/components/schemas/HealthResponse' }) } },
+        },
+      },
+      '/ready': {
+        get: {
+          tags: ['System'],
+          summary: 'Readiness probe (Soroban RPC, network, ledger freshness, contract)',
+          description:
+            'Runs four checks in parallel against the configured Soroban RPC: `rpc` (the RPC reports itself ' +
+            'healthy), `network` (the RPC serves the configured network passphrase), `ledger` (the latest ledger ' +
+            `is at most READY_MAX_LEDGER_AGE_SECONDS old, default 60) and \`contract\` (the configured escrow ` +
+            'contract is deployed). Every check is bounded by READY_CHECK_TIMEOUT_MS (default 2000) and the ' +
+            'result is reused for READY_CACHE_SECONDS (default 10) so probes cannot hammer the RPC. A failing ' +
+            'check reports a short error code (TIMEOUT, PASSPHRASE_MISMATCH, STALE_LEDGER, CONTRACT_NOT_FOUND, ' +
+            'RPC_ERROR); raw upstream messages are never returned.',
+          responses: {
+            200: { description: 'All checks passed', ...json({ $ref: '#/components/schemas/ReadinessResponse' }) },
+            503: { description: 'At least one check failed', ...json({ $ref: '#/components/schemas/ReadinessResponse' }) },
+          },
         },
       },
       '/errors/{code}': {
@@ -601,12 +780,23 @@ function createSpec(baseUrl) {
           tags: ['Invoices'],
           summary: 'Submit an invoice for financing',
           description: 'Every attempt, accepted or rejected, is recorded in the audit log as `invoice.create`.',
+          parameters: [IdempotencyKeyParam],
           requestBody: { required: true, ...json(GENERATED_SCHEMAS.CreateInvoiceBody) },
           responses: {
-            201: { description: 'Created', ...json({ type: 'object', properties: { data: Invoice } }) },
-            400: { description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
-            409: { description: 'Duplicate invoice or possible duplicate receivable', ...json(DuplicateError) },
-            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...problemJson({ $ref: '#/components/schemas/Problem' }) },
+            201: { description: 'Created', headers: IdempotencyHeaders, ...json({ type: 'object', properties: { data: Invoice } }) },
+            400: {
+              description: 'Validation failed (VALIDATION_FAILED, unknown keys rejected), or missing/invalid Idempotency-Key',
+              ...json(ref('ErrorResponse')),
+            },
+            403: { description: 'SME_NOT_VERIFIED (REQUIRE_SME_VERIFICATION=true and the SME is not verified)', ...json(ref('ErrorResponse')) },
+            404: { description: 'SME_NOT_FOUND (unknown smeId)', ...json(ref('ErrorResponse')) },
+            409: {
+              description: 'Duplicate invoice or possible duplicate receivable, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
+              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              ...json(DuplicateError),
+            },
+            415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...json(ref('ErrorResponse')) },
+            ...IdempotencyErrors,
           },
         },
       },
@@ -662,19 +852,26 @@ function createSpec(baseUrl) {
             'Every attempt, accepted or rejected (400, 404, 409, 422), is recorded in the audit log as `invoice.fund`, ' +
             'with the invoice `fundedAmount` and `status` before and after. A contribution is either accepted in full ' +
             'or rejected with a 422; set allowPartial to true to explicitly cap it at the remaining capacity.',
-          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }, IdempotencyKeyParam],
           requestBody: { required: true, ...json(FundRequest) },
           responses: {
-            200: { description: 'Updated invoice', ...json(FundResponse) },
+            200: { description: 'Updated invoice', headers: IdempotencyHeaders, ...json(FundResponse) },
             400: {
               description: 'Invalid amount (non-finite, non-positive, above face value), missing/invalid investor, ' +
                 'unknown body key or invalid id (VALIDATION_FAILED)',
               ...json(FundingError),
             },
             404: { description: 'Not found', ...json(ErrorBody) },
-            409: { description: 'Invoice not open', ...json(ErrorBody) },
+            409: {
+              description: 'Invoice not open, or IDEMPOTENCY_IN_PROGRESS (retry after Retry-After)',
+              headers: { 'Retry-After': { schema: { type: 'string' } } },
+              ...json(ErrorBody),
+            },
             415: { description: 'Content-Type must be application/json (UNSUPPORTED_MEDIA_TYPE)', ...json(ref('ErrorResponse')) },
-            422: { description: 'Contribution exceeds remaining capacity, or self-funding not allowed', ...json(FundingError) },
+            422: {
+              description: 'Contribution exceeds remaining capacity, self-funding not allowed, or IDEMPOTENCY_KEY_REUSED',
+              ...json(FundingError),
+            },
           },
         },
       },
@@ -1213,6 +1410,50 @@ function createSpec(baseUrl) {
           },
         },
       },
+      '/api/smes': {
+        post: {
+          tags: ['SMEs'],
+          summary: 'Register an SME for KYB review',
+          description: 'Creates the SME with status `pending`. contactEmail and registrationNumber are PII and are only returned to admins.',
+          requestBody: { required: true, ...json(ref('CreateSmeRequest')) },
+          responses: {
+            201: { description: 'SME created (pending review)', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
+            400: { description: 'Invalid SME fields (VALIDATION_FAILED)', ...json(ref('ErrorResponse')) },
+            409: { description: 'SME_DUPLICATE: same country + registration number, or same Stellar address', ...json(ref('ErrorResponse')) },
+            415: { description: 'Content-Type must be application/json', ...json(ref('ErrorResponse')) },
+          },
+        },
+      },
+      '/api/smes/{id}': {
+        get: {
+          tags: ['SMEs'],
+          summary: 'Get an SME',
+          description: 'contactEmail and registrationNumber are omitted unless a valid admin token is presented.',
+          security: [{ adminBearer: [] }, {}],
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            200: { description: 'SME record (PII omitted for non-admin callers)', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
+            404: { description: 'SME_NOT_FOUND', ...json(ref('ErrorResponse')) },
+          },
+        },
+      },
+      '/api/smes/{id}/review': {
+        post: {
+          tags: ['SMEs'],
+          summary: 'Review an SME (admin)',
+          description: 'Allowed transitions: pending → verified | rejected, verified → suspended. Each decision is appended to reviewHistory.',
+          security: adminSecurity,
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          requestBody: { required: true, ...json(ref('ReviewSmeRequest')) },
+          responses: {
+            200: { description: 'Review recorded', ...json({ type: 'object', properties: { data: ref('SmeRecord') } }) },
+            400: { description: 'Invalid review request (VALIDATION_FAILED)', ...json(ref('ErrorResponse')) },
+            404: { description: 'SME_NOT_FOUND', ...json(ref('ErrorResponse')) },
+            409: { description: 'INVALID_TRANSITION', ...json(ref('ErrorResponse')) },
+            ...adminErrors,
+          },
+        },
+      },
       '/api/webhooks': {
         post: {
           tags: ['Webhooks'],
@@ -1293,7 +1534,7 @@ function createSpec(baseUrl) {
         },
       },
     },
-  };
+  });
 }
 
 module.exports = { buildSpec };

@@ -8,6 +8,7 @@
  */
 
 const http = require('http');
+const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
@@ -100,7 +101,7 @@ describe('webhook delivery', () => {
 
     // Create invoice — triggers invoice.created
     const createRes = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Test SME', debtor: 'Buyer Corp', amount: 1000, dueDate: '2027-06-01' });
     expect(createRes.status).toBe(201);
 
@@ -131,7 +132,7 @@ describe('webhook delivery', () => {
 
     // Fund INV_0001 (amount=100) to completion in one shot
     const fundRes = await request(app)
-      .post('/api/invoices/INV_0001/fund')
+      .post('/api/invoices/INV_0001/fund').set(authHeader())
       .send({ amount: 100, investor: 'GBVBHCYGDUIUKPEYDCBAS47E55NQHGUHGNRVUIZJPI34IH2436XZFZNV' });
     expect(fundRes.status).toBe(200);
     expect(fundRes.body.data.status).toBe('funded');
@@ -161,7 +162,7 @@ describe('webhook delivery', () => {
 
     // Create should still succeed
     const res = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Resilient SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
 
     expect(res.status).toBe(201);
@@ -179,7 +180,7 @@ describe('webhook delivery', () => {
 
     // INV_0002 needs 25000; fund only 1000 (partial)
     const fundRes = await request(app)
-      .post('/api/invoices/INV_0002/fund')
+      .post('/api/invoices/INV_0002/fund').set(authHeader())
       .send({ amount: 1000, investor: 'GBVBHCYGDUIUKPEYDCBAS47E55NQHGUHGNRVUIZJPI34IH2436XZFZNV' });
     expect(fundRes.status).toBe(200);
     expect(fundRes.body.data.status).toBe('open');

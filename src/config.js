@@ -100,6 +100,67 @@ function isValidRpcUrl(urlStr) {
   return false;
 }
 
+// Roles an API key can carry. `admin` is accepted wherever a role is required.
+const ROLES = ['sme', 'investor', 'admin'];
+
+/**
+ * Parses `API_KEYS` (`id:role:sha256hex`, comma separated). Only SHA-256
+ * hashes are kept; raw keys are never stored. Problems are pushed to `errors`
+ * so a malformed entry fails startup with a clear message.
+ *
+ * @param {string|undefined} raw raw `API_KEYS` value
+ * @param {string[]} errors accumulated configuration errors
+ * @returns {{ id: string, role: string, hash: string }[]} parsed entries
+ */
+function parseApiKeys(raw, errors) {
+  if (!raw || !raw.trim()) {
+    return [];
+  }
+  const keys = [];
+  raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .forEach((entry, index) => {
+      const parts = entry.split(':');
+      const label = `API_KEYS entry #${index + 1}`;
+      if (parts.length !== 3) {
+        errors.push(`${label} must have the form id:role:sha256hex`);
+        return;
+      }
+      const [id, role, hash] = parts;
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+        errors.push(`${label} has an invalid id (expected 1-64 letters, digits, "_" or "-")`);
+      } else if (!ROLES.includes(role)) {
+        errors.push(`${label} ("${id}") has unknown role "${role}" (expected ${ROLES.join('|')})`);
+      } else if (!/^[0-9a-f]{64}$/i.test(hash)) {
+        errors.push(`${label} ("${id}") must store a 64-character hex SHA-256 hash`);
+      } else {
+        keys.push({ id, role, hash: hash.toLowerCase() });
+      }
+    });
+  return keys;
+}
+
+/**
+ * Reads an integer environment value.
+ *
+ * @param {string|undefined} raw raw environment value
+ * @param {number} fallback value used when the variable is unset or invalid
+ * @param {number} [min] smallest accepted value
+ * @returns {number} the configured value
+ */
+function envInt(raw, fallback, min = 0) {
+  if (raw === undefined || raw === '') {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min) {
+    return fallback;
+  }
+  return value;
+}
+
 /**
  * @param {string|undefined} raw environment value
  * @param {number} fallback value used when raw is missing or not a positive integer
@@ -244,6 +305,9 @@ function loadConfig(env = process.env) {
   const rawFee = Number(env.PROTOCOL_FEE_BPS);
   const protocolFeeBps = Number.isInteger(rawFee) && rawFee >= 0 ? rawFee : 0;
 
+  // API keys for mutating routes (see middleware/auth.js)
+  const apiKeys = parseApiKeys(env.API_KEYS, errors);
+
   if (errors.length > 0) {
     throw new ConfigError(errors);
   }
@@ -269,6 +333,15 @@ function loadConfig(env = process.env) {
     txWaitMs,
     protocolFeeBps,
     auditMaxEntries: positiveInt(env.AUDIT_MAX_ENTRIES, 10000),
+    // Readiness probe: per-check timeout, maximum accepted ledger age and how
+    // long a probe result may be reused before the RPC is called again.
+    readyCheckTimeoutMs: envInt(env.READY_CHECK_TIMEOUT_MS, 2000, 1),
+    readyMaxLedgerAgeSeconds: envInt(env.READY_MAX_LEDGER_AGE_SECONDS, 60, 1),
+    readyCacheSeconds: envInt(env.READY_CACHE_SECONDS, 10, 0),
+    nodeEnv: env.NODE_ENV || 'development',
+    ROLES,
+    apiKeys,
+    devApiKey: env.DEV_API_KEY || '',
     version,
   };
 }

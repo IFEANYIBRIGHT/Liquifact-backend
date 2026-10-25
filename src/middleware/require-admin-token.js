@@ -5,6 +5,24 @@ const crypto = require('crypto');
 const digest = (text) => crypto.createHash('sha256').update(text).digest();
 
 /**
+ * Whether the request carries `Authorization: Bearer ${ADMIN_API_TOKEN}`.
+ * Always false when ADMIN_API_TOKEN is not configured. Uses the same
+ * constant-time digest comparison as {@link requireAdminToken}.
+ *
+ * @param {import('express').Request} req request
+ * @returns {boolean} true only for a valid admin token
+ */
+function hasValidAdminToken(req) {
+  const expected = process.env.ADMIN_API_TOKEN;
+  if (!expected) {
+    return false;
+  }
+  const match = /^Bearer\s+(\S+)\s*$/i.exec(req.get('authorization') || '');
+  const matches = crypto.timingSafeEqual(digest(match ? match[1] : ''), digest(expected));
+  return Boolean(match) && matches;
+}
+
+/**
  * Guards admin-only routes with a shared secret:
  * `Authorization: Bearer ${ADMIN_API_TOKEN}`.
  *
@@ -25,9 +43,7 @@ function requireAdminToken(req, res, next) {
     res.status(503).json({ error: 'Admin API is not configured', code: 'ADMIN_TOKEN_NOT_CONFIGURED' });
     return;
   }
-  const match = /^Bearer\s+(\S+)\s*$/i.exec(req.get('authorization') || '');
-  const matches = crypto.timingSafeEqual(digest(match ? match[1] : ''), digest(expected));
-  if (!match || !matches) {
+  if (!hasValidAdminToken(req)) {
     res.set('WWW-Authenticate', 'Bearer');
     res.status(401).json({ error: 'Admin token required', code: 'UNAUTHORIZED' });
     return;
@@ -35,4 +51,7 @@ function requireAdminToken(req, res, next) {
   next();
 }
 
-module.exports = { requireAdminToken };
+// Marker for the route-table guard test: this guard admits only the admin secret.
+requireAdminToken.requiredRoles = ['admin'];
+
+module.exports = { requireAdminToken, hasValidAdminToken };

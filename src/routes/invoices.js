@@ -7,13 +7,16 @@ const { auditContext } = require('../audit/middleware');
 const contributions = require('../data/contributions');
 const config = require('../config');
 const { toMinor, fromMinor, couponMinor, daysBetween, annualisedBps } = require('../domain/returns');
-const { badRequest, notFound, conflict, unprocessable } = require('../errors');
+const { ApiError, badRequest, notFound, conflict, unprocessable } = require('../errors');
 const { parseInvoiceQuery, queryInvoices, InvoiceQueryError } = require('../services/invoice-query');
 const { requireAdminToken } = require('../middleware/require-admin-token');
 const escrowReader = require('./escrow');
 const { CreateInvoiceBody, FundInvoiceBodyShape, InvoiceIdParam } = require('../schemas');
 const { validate } = require('../middleware/validate');
 const emitter = require('../webhooks/emitter');
+const idempotency = require('../middleware/idempotency');
+const { requireRole } = require('../middleware/auth');
+const smes = require('../data/smes');
 
 const router = express.Router();
 router.use(auditContext());
@@ -41,7 +44,8 @@ function present(invoice) {
 function toInvoiceValue(d) {
   const invoiceNumber = typeof d.invoiceNumber === 'string' ? d.invoiceNumber.trim() : undefined;
   return {
-    sme: d.sme.trim(),
+    ...(typeof d.sme === 'string' ? { sme: d.sme.trim() } : {}),
+    ...(d.smeId ? { smeId: d.smeId } : {}),
     debtor: d.debtor.trim(),
     ...(invoiceNumber ? { invoiceNumber } : {}),
     smeAddress: typeof d.smeAddress === 'string' ? d.smeAddress : null,
@@ -80,7 +84,8 @@ router.get('/', (req, res) => {
       throw error;
     }
     const fieldErrors = Object.entries(error.details || {}).map(([field, message]) => ({ field, message }));
-    throw badRequest(error.code, error.message, fieldErrors);
+    // Keep the parameter-keyed `details` map existing clients rely on, alongside RFC 7807 `errors`.
+    throw new ApiError(400, error.code, error.message, { errors: fieldErrors, extra: { details: error.details } });
   }
 });
 
@@ -147,8 +152,61 @@ router.get('/:id/quote', idParam(), (req, res) => {
   });
 });
 
-router.post('/', validate({ body: CreateInvoiceBody, audit: 'invoice.create' }), (req, res) => {
-  const value = toInvoiceValue(req.validatedBody);
+/**
+ * Resolves the SME identity of a new invoice.
+ *
+ * With REQUIRE_SME_VERIFICATION=true an smeId is required, the SME must be
+ * verified, and `sme`/`smeAddress` always come from the SME record (client
+ * values are ignored, so an invoice cannot impersonate another SME). Without
+ * the flag, an smeId is optional; when given, it must exist and fills in any
+ * identity fields the client left out.
+ *
+ * @param {object} value validated invoice fields (mutated)
+ * @returns {{ status: number, error: string, code: string }|null} rejection, or null when accepted
+ */
+function applySmeIdentity(value) {
+  const enforce = process.env.REQUIRE_SME_VERIFICATION === 'true';
+  if (enforce && !value.smeId) {
+    return { status: 400, error: 'smeId is required when SME verification is enabled', code: 'SME_ID_REQUIRED' };
+  }
+  if (!value.smeId) {
+    return null;
+  }
+  const sme = smes.getSme(value.smeId);
+  if (!sme) {
+    return { status: 404, error: 'SME not found', code: 'SME_NOT_FOUND' };
+  }
+  if (enforce) {
+    if (sme.status !== 'verified') {
+      return { status: 403, error: 'Only verified SMEs may create invoices', code: 'SME_NOT_VERIFIED' };
+    }
+    value.sme = sme.legalName;
+    value.smeAddress = sme.stellarAddress;
+    return null;
+  }
+  if (value.sme === undefined) {
+    value.sme = sme.legalName;
+  }
+  if (value.smeAddress === null) {
+    value.smeAddress = sme.stellarAddress;
+  }
+  return null;
+}
+
+router.post('/', requireRole('sme', 'admin'), idempotency, validate({ body: CreateInvoiceBody, audit: 'invoice.create' }), (req, res) => {
+  // Record the opaque API key id that created the invoice (safe to return publicly).
+  const value = { ...toInvoiceValue(req.validatedBody), createdBy: req.principal.keyId };
+  const smeRejection = applySmeIdentity(value);
+  if (smeRejection) {
+    req.audit({
+      action: 'invoice.create',
+      resourceType: 'invoice',
+      outcome: 'rejected',
+      statusCode: smeRejection.status,
+      metadata: { code: smeRejection.code, smeId: value.smeId || null },
+    });
+    return res.status(smeRejection.status).json({ error: smeRejection.error, code: smeRejection.code });
+  }
   let invoice;
   try {
     invoice = store.create(value);
@@ -177,7 +235,7 @@ router.post('/', validate({ body: CreateInvoiceBody, audit: 'invoice.create' }),
   return res.status(201).json({ data: present(invoice) });
 });
 
-router.post('/:id/fund', validate({ params: InvoiceIdParam, body: FundInvoiceBodyShape, audit: 'invoice.fund' }), (req, res) => {
+router.post('/:id/fund', requireRole('investor', 'admin'), idempotency, validate({ params: InvoiceIdParam, body: FundInvoiceBodyShape, audit: 'invoice.fund' }), (req, res) => {
   const record = (details) =>
     req.audit({ action: 'invoice.fund', resourceType: 'invoice', resourceId: req.params.id, ...details });
   const reject = (statusCode, error, details, extra = {}) => {
@@ -324,7 +382,7 @@ function transitionAudit(req, res, action) {
   };
 }
 
-router.post('/:id/settle', idParam('invoice.settle'), (req, res) => {
+router.post('/:id/settle', requireRole('admin'), idParam('invoice.settle'), (req, res) => {
   const audit = transitionAudit(req, res, 'invoice.settle');
   const invoice = store.get(req.params.id);
   if (!invoice) {
@@ -337,7 +395,7 @@ router.post('/:id/settle', idParam('invoice.settle'), (req, res) => {
   return audit.success(before, store.settle(invoice));
 });
 
-router.post('/:id/cancel', idParam('invoice.cancel'), (req, res) => {
+router.post('/:id/cancel', requireRole('sme', 'admin'), idParam('invoice.cancel'), (req, res) => {
   const audit = transitionAudit(req, res, 'invoice.cancel');
   const invoice = store.get(req.params.id);
   if (!invoice) {

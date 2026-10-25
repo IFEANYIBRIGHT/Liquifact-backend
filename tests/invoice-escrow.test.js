@@ -1,5 +1,6 @@
 'use strict';
 
+const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const { StrKey } = require('@stellar/stellar-sdk');
 const app = require('../src/app');
@@ -116,7 +117,7 @@ describe('verified invoice escrow linking (#1553)', () => {
   });
 
   test('newly created invoice can become onChain after verification', async () => {
-    const created = await request(app).post('/api/invoices').send({
+    const created = await request(app).post('/api/invoices').set(authHeader()).send({
       sme: 'Fresh SME', debtor: 'Buyer', amount: 100, dueDate: '2027-01-01', yieldBps: 800,
     });
     expect(created.status).toBe(201);

@@ -1,5 +1,6 @@
 'use strict';
 
+const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const app = require('../src/app');
 const store = require('../src/data/store');
@@ -165,7 +166,7 @@ describe('GET /api/reconciliation', () => {
 
   test('fund INV_0001 off-chain then GET /api/reconciliation/INV_0001 reports fundedAmount drift', async () => {
     // Fund off-chain only.
-    await request(app).post('/api/invoices/INV_0001/fund').send({ amount: 10, investor: 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC' });
+    await request(app).post('/api/invoices/INV_0001/fund').set(authHeader()).send({ amount: 10, investor: 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC' });
 
     // RPC still returns funded_amount: "0" (deploy snapshot).
     escrowRoute.readEscrowOnChain.mockResolvedValue({ ...DEPLOY_SNAPSHOT });

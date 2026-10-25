@@ -15,6 +15,7 @@ const {
   getCatalogEntry,
   ERROR_BASE_URI,
 } = require('./errors');
+const { getReadiness } = require('./services/readiness');
 
 const app = express();
 app.disable('x-powered-by');
@@ -36,6 +37,18 @@ app.use(
 app.use(cors({ origin: config.corsOrigins.includes('*') ? '*' : config.corsOrigins }));
 app.use(express.json({ limit: '100kb' }));
 
+if (config.apiKeys.length === 0 && config.nodeEnv !== 'test') {
+  if (config.nodeEnv === 'production') {
+    console.warn(
+      '[auth] API_KEYS is empty: mutating routes fail closed with 503 AUTH_NOT_CONFIGURED until keys are configured',
+    );
+  } else {
+    console.warn(
+      '[auth] API_KEYS is empty: mutating routes only accept the dev key from DEV_API_KEY (never valid in production)',
+    );
+  }
+}
+
 
 /**
  * @param {import('express').Request} req incoming request
@@ -48,6 +61,7 @@ function baseUrl(req) {
 const ENDPOINTS = [
   { method: 'GET', path: '/', description: 'This index' },
   { method: 'GET', path: '/health', description: 'Liveness probe' },
+  { method: 'GET', path: '/ready', description: 'Readiness probe (Soroban RPC, network, ledger, contract)' },
   { method: 'GET', path: '/docs', description: 'Interactive API docs (Swagger UI)' },
   { method: 'GET', path: '/openapi.json', description: 'OpenAPI 3 document' },
   { method: 'GET', path: '/api/stats', description: 'Marketplace totals' },
@@ -75,6 +89,9 @@ const ENDPOINTS = [
   { method: 'POST', path: '/api/internal/indexer/run', description: 'Manually trigger escrow event indexer (internal, Bearer CRON_SECRET)' },
   { method: 'GET', path: '/api/reconciliation', description: 'Reconcile all on-chain invoices against escrow state' },
   { method: 'GET', path: '/api/reconciliation/:id', description: 'Reconcile one invoice against escrow state' },
+  { method: 'POST', path: '/api/smes', description: 'Register an SME for KYB review' },
+  { method: 'GET', path: '/api/smes/:id', description: 'Get an SME (PII for admins only)' },
+  { method: 'POST', path: '/api/smes/:id/review', description: 'Review an SME: verify | reject | suspend (admin)' },
   { method: 'POST', path: '/api/webhooks', description: 'Register a webhook subscription (admin)' },
   { method: 'GET', path: '/api/webhooks', description: 'List webhook subscriptions (admin)' },
   { method: 'DELETE', path: '/api/webhooks/:id', description: 'Remove a webhook subscription (admin)' },
@@ -94,10 +111,26 @@ app.get('/', (req, res) => {
   });
 });
 
+// Process start time, used by the liveness probe to report uptime.
+const PROCESS_STARTED_AT = Date.now();
+
 const health = (req, res) =>
-  res.json({ status: 'ok', service: 'liquifact-api', version: config.version, timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    service: 'liquifact-api',
+    version: config.version,
+    timestamp: new Date().toISOString(),
+    uptimeSeconds: Math.max(0, Math.floor((Date.now() - PROCESS_STARTED_AT) / 1000)),
+  });
 app.get('/health', health);
 app.get('/healthz', health);
+
+// Readiness probe: checks the Soroban RPC, the configured network, the ledger
+// freshness and the escrow contract. It is dependency-aware, unlike /health.
+app.get('/ready', async (req, res) => {
+  const result = await getReadiness();
+  res.status(result.status === 'ready' ? 200 : 503).json(result);
+});
 
 app.get('/openapi.json', (req, res) => res.json(buildSpec(baseUrl(req))));
 
@@ -139,6 +172,7 @@ app.use('/api/invoices/:id/document', require('./routes/invoiceDocument'));
 app.use('/api/escrow', require('./routes/escrow'));
 app.use('/api/reconciliation', require('./routes/reconciliation'));
 app.use('/api/webhooks', require('./routes/webhooks'));
+app.use('/api/smes', require('./routes/smes'));
 
 // Start webhook delivery listener (idempotent, safe to call multiple times)
 require('./webhooks/deliver').startListening();

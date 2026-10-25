@@ -20,13 +20,14 @@ const { requireAdminToken } = require('../middleware/require-admin-token');
 
 const router = express.Router();
 
+// Every route below is admin-only (guard declared per route so the route table shows it).
 router.use(requireAdminToken);
 
 // ---------------------------------------------------------------------------
 // POST /api/webhooks
 // ---------------------------------------------------------------------------
 
-router.post('/', async (req, res) => {
+router.post('/', requireAdminToken, async (req, res) => {
   const { url, events } = req.body || {};
 
   if (typeof url !== 'string' || !url.trim()) {
@@ -75,7 +76,7 @@ router.get('/', (req, res) => {
 // DELETE /api/webhooks/:id
 // ---------------------------------------------------------------------------
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', requireAdminToken, (req, res) => {
   const deleted = webhookStore.deleteWebhook(req.params.id);
   if (!deleted) {
     return res.status(404).json({ error: 'Webhook not found' });

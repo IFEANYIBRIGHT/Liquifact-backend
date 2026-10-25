@@ -101,7 +101,16 @@ function safeEqual(a, b) {
  *             schema:
  *               $ref: '#/components/schemas/Problem'
  */
-router.post('/run', async (req, res) => {
+/**
+ * Guards the cron trigger with `Authorization: Bearer <CRON_SECRET>`; 404 when
+ * CRON_SECRET is unset so the endpoint does not advertise itself.
+ *
+ * @param {import('express').Request} req request
+ * @param {import('express').Response} res response
+ * @param {import('express').NextFunction} next next handler
+ * @returns {void}
+ */
+function requireCronSecret(req, res, next) {
   const secret = process.env.CRON_SECRET;
 
   // 404 when secret is not configured — the endpoint is invisible
@@ -121,7 +130,12 @@ router.post('/run', async (req, res) => {
       detail: 'Invalid or missing Authorization: Bearer <CRON_SECRET>.',
     });
   }
+  return next();
+}
+// Marker for the route-table guard test (machine credential, not an API-key role).
+requireCronSecret.requiredRoles = ['cron'];
 
+router.post('/run', requireCronSecret, async (req, res) => {
   const maxPages = Math.min(
     Math.max(1, parseInt(req.body?.maxPages ?? '5', 10) || 5),
     20,

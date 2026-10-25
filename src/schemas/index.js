@@ -7,6 +7,7 @@
 
 const { z } = require('zod');
 const { extendZodWithOpenApi, OpenAPIRegistry } = require('@asteasolutions/zod-to-openapi');
+const { StrKey } = require('@stellar/stellar-sdk');
 const { STATUSES, normalizeIdentity } = require('../data/store');
 
 extendZodWithOpenApi(z);
@@ -80,7 +81,14 @@ const CreateInvoiceBody = registry.register(
   'CreateInvoiceBody',
   z
     .object({
-      sme: nameField('sme').openapi({ description: 'SME name', example: 'Acme Components Ltd' }),
+      sme: nameField('sme')
+        .optional()
+        .openapi({ description: 'SME name (required unless smeId is given; ignored when SME verification is enforced)', example: 'Acme Components Ltd' }),
+      smeId: z
+        .string()
+        .regex(/^SME_[A-Za-z0-9-]{1,64}$/, 'smeId must be an SME id (SME_...)')
+        .optional()
+        .openapi({ description: 'Onboarded SME. Required and must be verified when REQUIRE_SME_VERIFICATION=true.', example: 'SME_3f1c...' }),
       debtor: nameField('debtor').openapi({ description: 'Debtor name', example: 'Globex Retail' }),
       invoiceNumber: z
         .string({ invalid_type_error: INVOICE_NUMBER_MESSAGE })
@@ -120,9 +128,14 @@ const CreateInvoiceBody = registry.register(
         .string()
         .nullable()
         .optional()
-        .openapi({ description: 'Stellar address of the SME' }),
+        .openapi({ description: 'Stellar address of the SME (ignored when SME verification is enforced)' }),
     })
     .strict()
+    .superRefine((body, ctx) => {
+      if (body.sme === undefined && body.smeId === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sme'], message: 'sme must be a non-empty string (max 120 chars)' });
+      }
+    })
     .openapi('CreateInvoiceBody'),
 );
 
@@ -170,6 +183,7 @@ const Invoice = registry.register(
   z
     .object({
       id: z.string().regex(INVOICE_ID).openapi({ example: 'INV_0001' }),
+      smeId: z.string().optional().openapi({ description: 'Linked onboarded SME, when given' }),
       invoiceNumber: z.string().optional().openapi({ example: 'ACME-2027-001' }),
       sme: z.string().openapi({ example: 'Acme Components Ltd' }),
       smeAddress: z.string().nullable(),
@@ -185,6 +199,7 @@ const Invoice = registry.register(
       onChain: z.boolean().openapi({ description: 'Derived from escrowContractId !== null', readOnly: true }),
       createdAt: z.string().openapi({ format: 'date-time' }),
       duplicateOverride: z.boolean().optional(),
+      createdBy: z.string().optional().openapi({ description: 'Opaque id of the API key that created the invoice' }),
     })
     .openapi('Invoice'),
 );
@@ -206,8 +221,91 @@ const ErrorResponse = registry.register(
     .openapi('ErrorResponse'),
 );
 
+// ---------------------------------------------------------------------------
+// SME onboarding (KYB)
+// ---------------------------------------------------------------------------
+const ISO_COUNTRIES = new Set((
+  'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ ' +
+  'CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO ' +
+  'FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE ' +
+  'JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN ' +
+  'MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS ' +
+  'PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ ' +
+  'TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'
+).split(/\s+/));
+
+const SME_STATUSES = ['pending', 'verified', 'rejected', 'suspended'];
+
+const CreateSmeRequest = registry.register(
+  'CreateSmeRequest',
+  z
+    .object({
+      legalName: z.string().trim().min(2).max(200).openapi({ example: 'Acme Components Ltd' }),
+      registrationNumber: z
+        .string()
+        .trim()
+        .min(1)
+        .max(64)
+        .regex(/^[A-Za-z0-9/ -]+$/, 'registrationNumber may only contain letters, digits, spaces, / and -')
+        .openapi({ description: 'Company registration number (PII: admin-only on reads)', example: '12345' }),
+      country: z
+        .string()
+        .length(2)
+        .refine((value) => ISO_COUNTRIES.has(value.toUpperCase()), 'country must be an ISO 3166-1 alpha-2 code')
+        .openapi({ description: 'ISO 3166-1 alpha-2 country code', example: 'GB' }),
+      stellarAddress: z
+        .string()
+        .refine((value) => StrKey.isValidEd25519PublicKey(value), 'stellarAddress must be a valid Stellar G... account')
+        .openapi({ example: 'GA7TXEBMEPQCLHIYCWDN7RKAO5IMRD2UV7O7TZXMEW6VZUMEXNR4XBB5' }),
+      contactEmail: z
+        .string()
+        .trim()
+        .max(254)
+        .email('contactEmail must be a valid email address')
+        .openapi({ description: 'Contact email (PII: admin-only on reads)', example: 'ops@acme.test' }),
+    })
+    .strict()
+    .openapi('CreateSmeRequest'),
+);
+
+const ReviewSmeRequest = registry.register(
+  'ReviewSmeRequest',
+  z
+    .object({
+      decision: z.enum(['verify', 'reject', 'suspend']),
+      note: z.string().max(500).optional(),
+    })
+    .strict()
+    .openapi('ReviewSmeRequest'),
+);
+
+const SmeRecord = registry.register(
+  'SmeRecord',
+  z
+    .object({
+      id: z.string().openapi({ example: 'SME_3f1c2b9a-...' }),
+      legalName: z.string(),
+      registrationNumber: z.string().optional().openapi({ description: 'PII — present only for admin callers' }),
+      country: z.string(),
+      stellarAddress: z.string(),
+      contactEmail: z.string().optional().openapi({ description: 'PII — present only for admin callers' }),
+      status: z.enum(SME_STATUSES),
+      createdAt: z.string().openapi({ format: 'date-time' }),
+      reviewHistory: z.array(z.object({
+        decision: z.enum(['verify', 'reject', 'suspend']),
+        note: z.string(),
+        reviewedAt: z.string().openapi({ format: 'date-time' }),
+      })),
+    })
+    .openapi('SmeRecord'),
+);
+
 module.exports = {
   registry,
+  CreateSmeRequest,
+  ReviewSmeRequest,
+  SmeRecord,
+  SME_STATUSES,
   InvoiceIdParam,
   ListInvoicesQuery,
   CreateInvoiceBody,

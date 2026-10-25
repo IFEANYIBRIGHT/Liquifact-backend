@@ -16,6 +16,7 @@ const multer = require('multer');
 const store = require('../data/store');
 const { defaultDocumentStore } = require('../data/documentStore');
 
+const { requireRole } = require('../middleware/auth');
 const router = express.Router({ mergeParams: true });
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -121,7 +122,7 @@ function uploadSingle(req, res, next) {
  * POST /api/invoices/:id/document
  * Upload a PDF document for an invoice.
  */
-router.post('/', uploadSingle, (req, res) => {
+router.post('/', requireRole('sme', 'admin'), uploadSingle, (req, res) => {
   const { id } = req.params;
 
   // Invoice must exist

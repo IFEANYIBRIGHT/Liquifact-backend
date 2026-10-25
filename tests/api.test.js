@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { authHeader } = require('./helpers/auth');
 const request = require('supertest');
 const SwaggerParser = require('@apidevtools/swagger-parser');
 const app = require('../src/app');
@@ -13,9 +14,12 @@ const FIXTURE_PATH = path.join(__dirname, 'fixtures', 'sample.pdf');
 const FIXTURE_BYTES = fs.readFileSync(FIXTURE_PATH);
 const FIXTURE_SHA256 = crypto.createHash('sha256').update(FIXTURE_BYTES).digest('hex');
 
+const idempotency = require('../src/middleware/idempotency');
+
 beforeEach(() => {
   store.reset();
   defaultDocumentStore.clear();
+  idempotency.resetStore();
 });
 
 describe('system', () => {
@@ -132,8 +136,8 @@ describe('duplicate invoice guard', () => {
 
   test('permits multiple invoices without invoice numbers and gives them distinct ids', async () => {
     const payload = { sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' };
-    const first = await request(app).post('/api/invoices').send(payload);
-    const second = await request(app).post('/api/invoices').send(payload);
+    const first = await request(app).post('/api/invoices').set(authHeader()).send(payload);
+    const second = await request(app).post('/api/invoices').set(authHeader()).send(payload);
     expect(first.status).toBe(201);
     expect(second.status).toBe(201);
     expect(first.body.data.id).toMatch(/^INV_\d{4}$/);
@@ -142,53 +146,53 @@ describe('duplicate invoice guard', () => {
   });
 
   test('exact and possible duplicates are rejected with 409', async () => {
-    const first = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-1' }));
-    const exact = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-1' }));
+    const first = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'DUP-1' }));
+    const exact = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'DUP-1' }));
     expect(first.status).toBe(201);
     expect(exact.status).toBe(409);
     expect(exact.body).toEqual({ code: 'DUPLICATE_INVOICE', existingId: first.body.data.id });
 
-    const possible = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'DUP-2' }));
+    const possible = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'DUP-2' }));
     expect(possible.status).toBe(409);
     expect(possible.body).toEqual({ code: 'POSSIBLE_DUPLICATE', existingId: first.body.data.id });
   });
 
   test('normalized SME identity cannot bypass the exact duplicate check', async () => {
-    await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'N-1' }));
-    const variant = await request(app).post('/api/invoices').send(invoice({ sme: '  test   sme. ', invoiceNumber: 'N-1', amount: 900 }));
+    await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'N-1' }));
+    const variant = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ sme: '  test   sme. ', invoiceNumber: 'N-1', amount: 900 }));
     expect(variant.status).toBe(409);
     expect(variant.body.code).toBe('DUPLICATE_INVOICE');
   });
 
   test('confirmNotDuplicate overrides only a possible duplicate and is recorded', async () => {
-    await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'C-1' }));
-    const confirmed = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'C-2', confirmNotDuplicate: true }));
+    await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'C-1' }));
+    const confirmed = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'C-2', confirmNotDuplicate: true }));
     expect(confirmed.status).toBe(201);
     expect(confirmed.body.data.duplicateOverride).toBe(true);
     expect(confirmed.body.data).not.toHaveProperty('confirmNotDuplicate');
-    const exact = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'C-1', confirmNotDuplicate: true }));
+    const exact = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'C-1', confirmNotDuplicate: true }));
     expect(exact.status).toBe(409);
     expect(exact.body.code).toBe('DUPLICATE_INVOICE');
   });
 
   test('a cancelled invoice can be submitted again', async () => {
-    const first = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'X-1' }));
-    expect((await request(app).post(`/api/invoices/${first.body.data.id}/cancel`)).status).toBe(200);
-    const again = await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'X-1' }));
+    const first = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'X-1' }));
+    expect((await request(app).post(`/api/invoices/${first.body.data.id}/cancel`).set(authHeader())).status).toBe(200);
+    const again = await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'X-1' }));
     expect(again.status).toBe(201);
     expect(again.body.data.id).not.toBe(first.body.data.id);
   });
 
   test('rejects malformed invoice numbers and punctuation-only names', async () => {
-    expect((await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'bad number!' }))).status).toBe(400);
-    expect((await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'x'.repeat(65) }))).status).toBe(400);
-    expect((await request(app).post('/api/invoices').send(invoice({ sme: '...' }))).status).toBe(400);
+    expect((await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'bad number!' }))).status).toBe(400);
+    expect((await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'x'.repeat(65) }))).status).toBe(400);
+    expect((await request(app).post('/api/invoices').set(authHeader()).send(invoice({ sme: '...' }))).status).toBe(400);
   });
 
   test('store.reset rebuilds the duplicate indexes', async () => {
-    await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'R-1' }));
+    await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'R-1' }));
     store.reset();
-    expect((await request(app).post('/api/invoices').send(invoice({ invoiceNumber: 'R-1' }))).status).toBe(201);
+    expect((await request(app).post('/api/invoices').set(authHeader()).send(invoice({ invoiceNumber: 'R-1' }))).status).toBe(201);
     expect(store.get('INV_0001')).toBeDefined();
   });
 });
@@ -222,14 +226,14 @@ describe('invoices', () => {
   });
 
   test('create validates and stores', async () => {
-    const bad = await request(app).post('/api/invoices').send({ sme: '' });
+    const bad = await request(app).post('/api/invoices').set(authHeader()).send({ sme: '' });
     expect(bad.status).toBe(400);
     expect(bad.type).toMatch(/application\/problem\+json/);
     expect(bad.body.code).toBe('VALIDATION_FAILED');
     expect(bad.body.errors).toBeDefined();
     expect(Array.isArray(bad.body.errors)).toBe(true);
     const ok = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01' });
     expect(ok.status).toBe(201);
     expect(ok.body.data.status).toBe('open');
@@ -238,11 +242,11 @@ describe('invoices', () => {
 
   test('fund moves invoice to funded when target reached', async () => {
     const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('funded');
     expect(res.body.data.remainingCapacity).toBe(0);
-    const again = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor });
+    const again = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor });
     expect(again.status).toBe(409);
     expect(again.type).toMatch(/application\/problem\+json/);
     expect(again.body.code).toBe('INVOICE_NOT_OPEN');
@@ -288,7 +292,7 @@ describe('invoices', () => {
     const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
 
     test('rejects over-funding with 422 and does not mutate', async () => {
-      const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 20000, investor });
+      const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 20000, investor });
       expect(res.status).toBe(422);
       expect(res.body.code).toBe('FUNDING_EXCEEDS_CAPACITY');
       expect(res.body.remainingCapacity).toBe(7000);
@@ -299,7 +303,7 @@ describe('invoices', () => {
 
     test('allowPartial caps contribution and reports split', async () => {
       const res = await request(app)
-        .post('/api/invoices/INV_0002/fund')
+        .post('/api/invoices/INV_0002/fund').set(authHeader())
         .send({ amount: 20000, investor, allowPartial: true });
       expect(res.status).toBe(200);
       expect(res.body.accepted).toBe(7000);
@@ -311,7 +315,7 @@ describe('invoices', () => {
 
     test('rejects invalid amounts (non-positive, non-finite, above face value, non-number) with 400', async () => {
       for (const amount of [0, -1, 1e308, 25001, '100']) {
-        const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount, investor });
+        const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount, investor });
         expect(res.status).toBe(400);
         expect(res.body.code).toBe('INVALID_AMOUNT');
       }
@@ -319,14 +323,14 @@ describe('invoices', () => {
     });
 
     test('an amount just above remaining capacity is rejected with 422', async () => {
-      const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7001, investor });
+      const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7001, investor });
       expect(res.status).toBe(422);
       expect(res.body.code).toBe('FUNDING_EXCEEDS_CAPACITY');
     });
 
     test('rejects funding a non-open invoice with 409', async () => {
-      await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
-      const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 1, investor });
+      await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
+      const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 1, investor });
       expect(res.status).toBe(409);
     });
   });
@@ -340,19 +344,19 @@ describe('invoices', () => {
 
   test('create rejects non-ISO dueDate', async () => {
     const bad = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: 'January 1, 2027' });
     expect(bad.status).toBe(400);
 
     const alsoBad = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '01/01/2027' });
     expect(alsoBad.status).toBe(400);
   });
 
   test('create treats null yieldBps as default', async () => {
     const ok = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'Test SME', debtor: 'Buyer', amount: 500, dueDate: '2027-01-01', yieldBps: null });
     expect(ok.status).toBe(201);
     expect(ok.body.data.yieldBps).toBe(800);
@@ -360,42 +364,42 @@ describe('invoices', () => {
 
   test('settle moves funded invoice to settled', async () => {
     const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
-    const res = await request(app).post('/api/invoices/INV_0002/settle');
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
+    const res = await request(app).post('/api/invoices/INV_0002/settle').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('settled');
   });
 
   test('settle rejects non-funded invoice', async () => {
-    const res = await request(app).post('/api/invoices/INV_0001/settle');
+    const res = await request(app).post('/api/invoices/INV_0001/settle').set(authHeader());
     expect(res.status).toBe(409);
   });
 
   test('cancel moves open invoice to cancelled', async () => {
-    const res = await request(app).post('/api/invoices/INV_0001/cancel');
+    const res = await request(app).post('/api/invoices/INV_0001/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
   });
 
   test('cancel moves funded invoice to cancelled', async () => {
     const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
-    const res = await request(app).post('/api/invoices/INV_0002/cancel');
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
+    const res = await request(app).post('/api/invoices/INV_0002/cancel').set(authHeader());
     expect(res.status).toBe(200);
     expect(res.body.data.status).toBe('cancelled');
   });
 
   test('cancel rejects settled invoice', async () => {
     const investor = 'GBTUJNOF2WAAUPKCJHBB76ID5HGN6KMTUG43F3Z344T7QRTP7B7TVPVC';
-    await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 7000, investor });
-    await request(app).post('/api/invoices/INV_0002/settle');
-    const res = await request(app).post('/api/invoices/INV_0002/cancel');
+    await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 7000, investor });
+    await request(app).post('/api/invoices/INV_0002/settle').set(authHeader());
+    const res = await request(app).post('/api/invoices/INV_0002/cancel').set(authHeader());
     expect(res.status).toBe(409);
   });
 
   test('settle and cancel return 404 for missing invoice', async () => {
-    expect((await request(app).post('/api/invoices/missing/settle')).status).toBe(404);
-    expect((await request(app).post('/api/invoices/missing/cancel')).status).toBe(404);
+    expect((await request(app).post('/api/invoices/missing/settle').set(authHeader())).status).toBe(404);
+    expect((await request(app).post('/api/invoices/missing/cancel').set(authHeader())).status).toBe(404);
   });
 });
 
@@ -420,7 +424,7 @@ describe('error handling', () => {
 describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('uploads a valid PDF and returns correct SHA-256 digest', async () => {
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
 
     expect(res.status).toBe(201);
@@ -432,7 +436,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
 
   test('upload attaches document metadata to the invoice', async () => {
     await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'invoice.pdf', contentType: 'application/pdf' });
 
     const invoiceRes = await request(app).get('/api/invoices/INV_0001');
@@ -442,14 +446,14 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
 
   test('returns 404 for unknown invoice', async () => {
     const res = await request(app)
-      .post('/api/invoices/UNKNOWN_INV/document')
+      .post('/api/invoices/UNKNOWN_INV/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(404);
   });
 
   test('returns 409 when invoice is not open (funded)', async () => {
     const res = await request(app)
-      .post('/api/invoices/INV_0003/document')
+      .post('/api/invoices/INV_0003/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('CONFLICT');
@@ -457,7 +461,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
 
   test('returns 409 when invoice is not open (settled)', async () => {
     const res = await request(app)
-      .post('/api/invoices/INV_0004/document')
+      .post('/api/invoices/INV_0004/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('CONFLICT');
@@ -465,11 +469,11 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
 
   test('returns 409 DOCUMENT_EXISTS on second upload', async () => {
     await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
 
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
 
     expect(res.status).toBe(409);
@@ -479,7 +483,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('returns 400 when no file is provided', async () => {
     // Send a multipart request with a non-file field, so multer gets no 'file' field
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .field('other', 'value');
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('BAD_REQUEST');
@@ -491,7 +495,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
     // Build a fake "PDF" that is over the size limit, the multer limit fires before content validation
     const oversize = Buffer.alloc(MAX, 0x41); // fill with 'A'
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', oversize, { filename: 'big.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(413);
     expect(res.body.error).toBe('PAYLOAD_TOO_LARGE');
@@ -500,7 +504,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('returns 415 for file with wrong magic bytes (not a real PDF)', async () => {
     const fakePdf = Buffer.from('This is not a PDF file at all\n%%EOF\n');
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', fakePdf, { filename: 'fake.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(415);
     expect(res.body.error).toBe('UNSUPPORTED_MEDIA_TYPE');
@@ -509,7 +513,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('returns 415 for file with .pdf name but wrong content type when magic bytes are absent', async () => {
     const plainText = Buffer.from('not a pdf content here');
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', plainText, { filename: 'invoice.pdf', contentType: 'text/plain' });
     expect(res.status).toBe(415);
     expect(res.body.error).toBe('UNSUPPORTED_MEDIA_TYPE');
@@ -518,7 +522,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('returns 422 for PDF containing /JavaScript action', async () => {
     const unsafePdf = Buffer.from('%PDF-1.4\n/JavaScript (alert(1))\n%%EOF');
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', unsafePdf, { filename: 'unsafe.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('UNSAFE_PDF');
@@ -527,7 +531,7 @@ describe('invoice document: upload (POST /api/invoices/:id/document)', () => {
   test('returns 422 for PDF containing /Launch action', async () => {
     const unsafePdf = Buffer.from('%PDF-1.4\n/Launch /Action\n%%EOF');
     const res = await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', unsafePdf, { filename: 'unsafe.pdf', contentType: 'application/pdf' });
     expect(res.status).toBe(422);
     expect(res.body.error).toBe('UNSAFE_PDF');
@@ -538,7 +542,7 @@ describe('invoice document: download (GET /api/invoices/:id/document)', () => {
   beforeEach(async () => {
     // Upload a document to INV_0001 before each download test
     await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
   });
 
@@ -590,7 +594,7 @@ describe('invoice document: download (GET /api/invoices/:id/document)', () => {
 describe('invoice document: metadata (GET /api/invoices/:id/document/meta)', () => {
   beforeEach(async () => {
     await request(app)
-      .post('/api/invoices/INV_0001/document')
+      .post('/api/invoices/INV_0001/document').set(authHeader())
       .attach('file', FIXTURE_BYTES, { filename: 'sample.pdf', contentType: 'application/pdf' });
   });
 
@@ -694,7 +698,7 @@ describe('zod validation (#1562)', () => {
 
   test('POST /api/invoices with an unknown field returns 400', async () => {
     const res = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: 'A', debtor: 'B', amount: 5, dueDate: '2027-01-01', isAdmin: true });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('VALIDATION_FAILED');
@@ -702,14 +706,14 @@ describe('zod validation (#1562)', () => {
   });
 
   test('POST /api/invoices/:id/fund with an unknown field returns 400', async () => {
-    const res = await request(app).post('/api/invoices/INV_0002/fund').send({ amount: 10, investor: INVESTOR, extra: 'bad' });
+    const res = await request(app).post('/api/invoices/INV_0002/fund').set(authHeader()).send({ amount: 10, investor: INVESTOR, extra: 'bad' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('VALIDATION_FAILED');
     expect(store.get('INV_0002').fundedAmount).toBe(18000);
   });
 
   test.each(['/api/invoices', '/api/invoices/INV_0001/fund'])('POST %s with text/plain returns 415', async (url) => {
-    const res = await request(app).post(url).set('Content-Type', 'text/plain').send('amount=100');
+    const res = await request(app).post(url).set(authHeader()).set('Content-Type', 'text/plain').send('amount=100');
     expect(res.status).toBe(415);
     expect(res.body.code).toBe('UNSUPPORTED_MEDIA_TYPE');
   });
@@ -719,13 +723,13 @@ describe('zod validation (#1562)', () => {
     const read = await request(app).get(`/api/invoices/${longId}`);
     expect(read.status).toBe(400);
     expect(read.body.code).toBe('VALIDATION_FAILED');
-    const fund = await request(app).post(`/api/invoices/${longId}/fund`).send({ amount: 100, investor: INVESTOR });
+    const fund = await request(app).post(`/api/invoices/${longId}/fund`).set(authHeader()).send({ amount: 100, investor: INVESTOR });
     expect(fund.status).toBe(400);
     expect(fund.body.errors.map((e) => e.path)).toContain('id');
   });
 
   test('errors[] carries path, message and code for each invalid field; details stays a string array', async () => {
-    const res = await request(app).post('/api/invoices').send({ sme: '', debtor: 123, amount: -1, dueDate: 'not-a-date' });
+    const res = await request(app).post('/api/invoices').set(authHeader()).send({ sme: '', debtor: 123, amount: -1, dueDate: 'not-a-date' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('VALIDATION_FAILED');
     for (const e of res.body.errors) {
@@ -740,13 +744,13 @@ describe('zod validation (#1562)', () => {
 
   test('field rules and defaults are preserved (trim, uppercase currency, yieldBps 800)', async () => {
     const res = await request(app)
-      .post('/api/invoices')
+      .post('/api/invoices').set(authHeader())
       .send({ sme: '  Trim SME  ', debtor: ' Buyer ', amount: 10, currency: 'usdc', dueDate: '2027-01-01' });
     expect(res.status).toBe(201);
     expect(res.body.data).toMatchObject({ sme: 'Trim SME', debtor: 'Buyer', currency: 'USDC', yieldBps: 800, smeAddress: null });
-    const tooLong = await request(app).post('/api/invoices').send({ sme: 'x'.repeat(121), debtor: 'B', amount: 10, dueDate: '2027-01-01' });
+    const tooLong = await request(app).post('/api/invoices').set(authHeader()).send({ sme: 'x'.repeat(121), debtor: 'B', amount: 10, dueDate: '2027-01-01' });
     expect(tooLong.status).toBe(400);
-    const tooBig = await request(app).post('/api/invoices').send({ sme: 'A', debtor: 'B', amount: 1e12 + 1, dueDate: '2027-01-01' });
+    const tooBig = await request(app).post('/api/invoices').set(authHeader()).send({ sme: 'A', debtor: 'B', amount: 1e12 + 1, dueDate: '2027-01-01' });
     expect(tooBig.status).toBe(400);
   });
 
